@@ -1,0 +1,17 @@
+{
+  "status": "init",
+  "executionArgs": {
+    "projectName": "civicpulse-ai",
+    "projectPath": "d:/civicpulse-ai",
+    "testIds": [],
+    "additionalInstruction": "",
+    "serverMode": "development",
+    "envs": {
+      "API_KEY": "sk-user-FpmkcJvJSymyGEeFcqruEKqLBDkengHoE0mZu3Zzqtf0xXElb5tCORtrbtGqPSDnp4W5j5tVdSJm4Aq7q-ytz3CNA-Gy-IEHRRG6GCsCrBJIMXAeUU__gAhND-IFXmUI1MA"
+    }
+  },
+  "scope": "codebase",
+  "type": "backend",
+  "localEndpoint": "http://localhost:5173/",
+  "serverPort": 52376
+}
