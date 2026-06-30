@@ -11,6 +11,9 @@ export interface IUser extends Document {
   locality?: string;
   street?: string;
   city?: string;
+  district?: string;
+  taluk?: string;
+  department?: string;
   state?: string;
   pincode?: string;
   lat?: number;
@@ -36,6 +39,9 @@ const userSchema = new Schema(
     locality: { type: String },
     street: { type: String },
     city: { type: String },
+    district: { type: String },
+    taluk: { type: String },
+    department: { type: String },
     state: { type: String },
     pincode: { type: String },
     lat: { type: Number },

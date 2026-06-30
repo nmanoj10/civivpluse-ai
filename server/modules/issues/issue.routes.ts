@@ -1,4 +1,4 @@
-﻿import { Router } from 'express';
+import { Router } from 'express';
 import {
   reportIssue,
   uploadMedia,
@@ -76,5 +76,10 @@ router.get('/feed/locality', verifyJWT, getLocalityFeed);
 
 // Nearby issues for verification
 router.get('/nearby/verify', verifyJWT, getNearbyIssues);
+
+// Chat history & messages (Phase 8 & 11)
+import { getChatHistory, postChatMessage } from './chat.controller';
+router.get('/:issueId/chat', verifyJWT, getChatHistory);
+router.post('/:issueId/chat', verifyJWT, postChatMessage);
 
 export default router;

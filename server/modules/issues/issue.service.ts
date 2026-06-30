@@ -7,6 +7,8 @@ import { transitionStatus } from '../../utils/issueStateMachine';
 import { createTimelineEvent } from './timeline.service';
 import { createAuditLog } from '../audit/audit.service';
 import { uploadMultipleToImageKit } from './imagekit.service';
+import { createNotification } from '../notifications/notification.service';
+import { NOTIFICATION_TYPES } from '../../config/constants';
 import { logger } from '../../utils/logger';
 
 export const createIssue = async (issueData: any, userId: string) => {
@@ -71,6 +73,19 @@ export const createIssue = async (issueData: any, userId: string) => {
     undefined,
     ISSUE_STATUS.SUBMITTED
   );
+
+  // Notify citizen that their issue was created
+  try {
+    await createNotification(
+      userId,
+      NOTIFICATION_TYPES.ISSUE_SUBMITTED,
+      'Issue Reported Successfully',
+      `Your reported issue "${issue.title}" has been submitted and is being processed by our AI system.`,
+      issue._id.toString()
+    );
+  } catch (notifErr: any) {
+    logger.error('IssueService', 'Failed to create creation notification', { error: notifErr?.message });
+  }
 
   // Emit real-time Socket.IO event to ward and city rooms
   try {
@@ -178,6 +193,14 @@ export const attachMediaToIssue = async (issueId: string, files: Express.Multer.
     issueId,
     count: mediaDocuments.length
   });
+
+  // Save to issue.media directly for fast schema access (Step 2)
+  issue.media = mediaDocuments.map(doc => ({
+    imageUrl: doc.url,
+    thumbnailUrl: doc.thumbnailUrl || doc.url,
+    imageKitFileId: doc.imageKitFileId,
+    uploadedBy: doc.uploadedBy
+  }));
 
   // If there's a MasterIssue linked, update its evidenceCount
   if (issue.masterIssueId) {

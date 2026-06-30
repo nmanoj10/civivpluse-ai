@@ -4,11 +4,31 @@ import connectDB, { closeDB } from './server/config/db';
 import { User } from './server/modules/users/user.model';
 import { CitizenScore } from './server/modules/users/citizenScore.model';
 import { Issue } from './server/modules/issues/issue.model';
+import { MasterIssue } from './server/modules/issues/masterIssue.model';
 import { Department } from './server/modules/assignments/department.model';
 import { Ward } from './server/modules/assignments/ward.model';
 import { ManualReview } from './server/modules/admin/manualReview.model';
 import { Resolution } from './server/modules/resolutions/resolution.model';
 import { USER_ROLES, ISSUE_STATUS, SEVERITY_LEVELS, RESOLUTION_STATUS } from './server/config/constants';
+
+// Helper: create a MasterIssue and link the Issue to it
+const createMasterIssueFor = async (issue: any) => {
+  const master = await MasterIssue.create({
+    title: issue.title,
+    description: issue.description,
+    category: issue.reportedCategory || issue.predictedCategory || 'Other',
+    location: issue.location,
+    supporterCount: 1,
+    reportCount: 1,
+    duplicateCount: 0,
+    evidenceCount: 0,
+    verificationCount: 0,
+    priorityScore: issue.priorityScore || 0,
+    trustScore: issue.trustScore || 0,
+    status: 'Open'
+  });
+  await Issue.findByIdAndUpdate(issue._id, { masterIssueId: master._id });
+};
 
 export async function seed() {
   console.log('Clearing old database collections...');
@@ -60,6 +80,7 @@ export async function seed() {
     role: USER_ROLES.WARD_OFFICER,
     city: 'Metropolis',
     ward: 'Ward 1',
+    department: 'Road Maintenance',
     isVerified: true
   });
 
@@ -70,6 +91,7 @@ export async function seed() {
     role: USER_ROLES.WARD_OFFICER,
     city: 'Metropolis',
     ward: 'Ward 2',
+    department: 'Water Supply',
     isVerified: true
   });
 
@@ -124,71 +146,99 @@ export async function seed() {
   console.log('Creating Multi-Stage Sample Issues...');
 
   // 1. Issue: OPEN_FOR_COMMUNITY_VERIFICATION (Needs votes from other citizens)
-  await Issue.create({
+  const issue1 = await Issue.create({
     reportedBy: citizen1._id,
     title: 'Damaged sidewalk near Central Park',
     description: 'The concrete slabs have raised, causing a major tripping hazard for pedestrians.',
     reportedCategory: 'Road & Transport',
     predictedCategory: 'Road & Transport',
     location: {
-      lat: 40.7128,
-      lng: -74.0060,
-      address: 'Central Park West',
+      lat: 12.9716,
+      lng: 77.5946,
+      address: 'MG Road, Central Park West',
       ward: 'Ward 1',
       city: 'Metropolis',
-      geoJSON: { type: 'Point', coordinates: [-74.0060, 40.7128] }
+      geoJSON: { type: 'Point', coordinates: [77.5946, 12.9716] }
     },
     status: ISSUE_STATUS.OPEN_FOR_COMMUNITY_VERIFICATION,
     trustScore: 70,
     severity: SEVERITY_LEVELS.LOW,
-    priorityScore: 20
+    priorityScore: 20,
+    supportCount: 1,
+    rejectCount: 0,
+    assignedOfficer: officer1._id,
+    assignedDepartment: roadsDept._id,
+    assignment: {
+      departmentId: roadsDept._id,
+      wardId: (await Ward.findOne({ wardName: 'Ward 1' }))?._id,
+      officerId: officer1._id
+    },
+    assignedAt: new Date()
   });
+  await createMasterIssueFor(issue1);
 
   // 2. Issue: COMMUNITY_VERIFIED (Ready to be assigned/processed by system)
-  await Issue.create({
+  const issue2 = await Issue.create({
     reportedBy: citizen3._id,
     title: 'Massive pothole on Main St',
     description: 'This pothole is ruining tires and causing accidents. Needs immediate fixing.',
     reportedCategory: 'Road & Transport',
     predictedCategory: 'Road & Transport',
     location: {
-      lat: 40.7130,
-      lng: -74.0070,
-      address: 'Main St & 3rd Ave',
+      lat: 12.9720,
+      lng: 77.5950,
+      address: 'Main St & 3rd Ave, Ward 1',
       ward: 'Ward 1',
       city: 'Metropolis',
-      geoJSON: { type: 'Point', coordinates: [-74.0070, 40.7130] }
+      geoJSON: { type: 'Point', coordinates: [77.5950, 12.9720] }
     },
     status: ISSUE_STATUS.COMMUNITY_VERIFIED,
     trustScore: 92,
     severity: SEVERITY_LEVELS.HIGH,
-    priorityScore: 75
+    priorityScore: 75,
+    supportCount: 4,
+    rejectCount: 0,
+    assignedOfficer: officer1._id,
+    assignedDepartment: roadsDept._id,
+    assignment: {
+      departmentId: roadsDept._id,
+      wardId: (await Ward.findOne({ wardName: 'Ward 1' }))?._id,
+      officerId: officer1._id
+    },
+    assignedAt: new Date()
   });
+  await createMasterIssueFor(issue2);
 
   // 3. Issue: IN_PROGRESS (Officer is resolving it)
-  await Issue.create({
+  const issue3 = await Issue.create({
     reportedBy: citizen2._id,
     title: 'Leaking fire hydrant',
     description: 'Water spraying everywhere since yesterday. Causing localized street flooding.',
     reportedCategory: 'Water & Sanitation',
     predictedCategory: 'Water & Sanitation',
     location: {
-      lat: 40.7138,
-      lng: -74.0050,
-      address: '2nd Ave & B St',
+      lat: 12.9738,
+      lng: 77.5950,
+      address: '2nd Ave & B St, Ward 2',
       ward: 'Ward 2',
       city: 'Metropolis',
-      geoJSON: { type: 'Point', coordinates: [-74.0050, 40.7138] }
+      geoJSON: { type: 'Point', coordinates: [77.5950, 12.9738] }
     },
     status: ISSUE_STATUS.IN_PROGRESS,
     trustScore: 88,
     severity: SEVERITY_LEVELS.MEDIUM,
     priorityScore: 40,
+    supportCount: 3,
+    rejectCount: 0,
     assignment: {
       departmentId: waterDept._id,
       officerId: officer2._id
-    }
+    },
+    assignedOfficer: officer2._id,
+    assignedDepartment: waterDept._id,
+    assignedAt: new Date(Date.now() - 86400000)
   });
+  await createMasterIssueFor(issue3);
 
   // 4. Issue: PENDING_CITIZEN_CONFIRMATION (Resolution submitted, awaiting confirmation)
   const issue4 = await Issue.create({
@@ -198,22 +248,28 @@ export async function seed() {
     reportedCategory: 'Road & Transport',
     predictedCategory: 'Road & Transport',
     location: {
-      lat: 40.7115,
-      lng: -74.0090,
-      address: '456 Elm St',
+      lat: 12.9715,
+      lng: 77.5940,
+      address: '456 Elm St, Ward 1',
       ward: 'Ward 1',
       city: 'Metropolis',
-      geoJSON: { type: 'Point', coordinates: [-74.0090, 40.7115] }
+      geoJSON: { type: 'Point', coordinates: [77.5940, 12.9715] }
     },
     status: ISSUE_STATUS.PENDING_CITIZEN_CONFIRMATION,
     trustScore: 95,
     severity: SEVERITY_LEVELS.MEDIUM,
     priorityScore: 50,
+    supportCount: 2,
+    rejectCount: 0,
     assignment: {
       departmentId: roadsDept._id,
       officerId: officer1._id
-    }
+    },
+    assignedOfficer: officer1._id,
+    assignedDepartment: roadsDept._id,
+    assignedAt: new Date(Date.now() - 172800000)
   });
+  await createMasterIssueFor(issue4);
 
   await Resolution.create({
     issueId: issue4._id,
@@ -237,18 +293,21 @@ export async function seed() {
     reportedCategory: 'Waste Management',
     predictedCategory: 'Waste Management',
     location: {
-      lat: 40.7150,
-      lng: -74.0020,
-      address: 'Warehouse Lane',
+      lat: 12.9750,
+      lng: 77.5960,
+      address: 'Warehouse Lane, Ward 2',
       ward: 'Ward 2',
       city: 'Metropolis',
-      geoJSON: { type: 'Point', coordinates: [-74.0020, 40.7150] }
+      geoJSON: { type: 'Point', coordinates: [77.5960, 12.9750] }
     },
     status: ISSUE_STATUS.NEEDS_MANUAL_REVIEW,
     trustScore: 45,
     severity: SEVERITY_LEVELS.HIGH,
-    priorityScore: 60
+    priorityScore: 60,
+    supportCount: 0,
+    rejectCount: 2
   });
+  await createMasterIssueFor(flaggedIssue);
 
   // Create corresponding ManualReview document
   await ManualReview.create({
@@ -266,22 +325,28 @@ export async function seed() {
     reportedCategory: 'Water & Sanitation',
     predictedCategory: 'Water & Sanitation',
     location: {
-      lat: 40.7180,
-      lng: -74.0010,
-      address: 'Oak Dr',
+      lat: 12.9780,
+      lng: 77.6000,
+      address: 'Oak Dr, Ward 1',
       ward: 'Ward 1',
       city: 'Metropolis',
-      geoJSON: { type: 'Point', coordinates: [-74.0010, 40.7180] }
+      geoJSON: { type: 'Point', coordinates: [77.6000, 12.9780] }
     },
     status: ISSUE_STATUS.CLOSED_RESOLVED,
     trustScore: 90,
     severity: SEVERITY_LEVELS.MEDIUM,
     priorityScore: 35,
+    supportCount: 3,
+    rejectCount: 0,
     assignment: {
       departmentId: waterDept._id,
       officerId: officer1._id
-    }
+    },
+    assignedOfficer: officer1._id,
+    assignedDepartment: waterDept._id,
+    assignedAt: new Date(Date.now() - 172800000)
   });
+  await createMasterIssueFor(issue6);
 
   await Resolution.create({
     issueId: issue6._id,

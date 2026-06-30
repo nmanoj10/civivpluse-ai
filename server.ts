@@ -61,10 +61,23 @@ async function startServer() {
   // Initialize Socket.IO
   initSocket(server);
 
-  server.listen(PORT, "0.0.0.0", () => {
+  server.listen(PORT, "0.0.0.0", async () => {
     const addressInfo = server.address();
     const actualPort = typeof addressInfo === "string" ? addressInfo : addressInfo?.port;
     console.log(`Backend server running on http://localhost:${actualPort}`);
+
+    // Start SLA Overdue Check Background Job (every 30 seconds)
+    try {
+      const { runSlaJob } = await import('./server/modules/jobs/sla.job');
+      // Run once immediately on startup
+      runSlaJob().catch(console.error);
+      setInterval(() => {
+        runSlaJob().catch(console.error);
+      }, 30000);
+      console.log('Background SLA Overdue Job started.');
+    } catch (jobErr) {
+      console.error('Failed to start background SLA Overdue Job:', jobErr);
+    }
   });
 }
 

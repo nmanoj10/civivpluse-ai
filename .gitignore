@@ -5,6 +5,6 @@ coverage/
 .DS_Store
 *.log
 .env*
-!.env.example
+.env.example
 
 testsprite_tests\tmp\config.json

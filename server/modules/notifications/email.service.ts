@@ -119,3 +119,30 @@ export const fanOutTransitionEmails = async (
     logger.error('EmailService', 'Fan-out email failed', { issueId, error: err?.message });
   }
 };
+
+export const sendEscalationEmail = async (
+  recipientEmail: string,
+  issueTitle: string,
+  issueId: string,
+  level: number,
+  reason: string
+): Promise<void> => {
+  try {
+    const t = await getTransporter();
+    const info = await t.sendMail({
+      from: process.env.EMAIL_FROM || '"CivicPulse AI" <noreply@civicpulse.ai>',
+      to: recipientEmail,
+      subject: `🚨 [ESCALATION LEVEL ${level}] SLA Breach: ${issueTitle}`,
+      text: `Alert: The issue "${issueTitle}" has breached its SLA.\n\nEscalation Level: ${level}\nReason: ${reason}\n\nTrack progress or take action at: ${process.env.FRONTEND_URL || 'http://localhost:5173'}/issues/${issueId}`,
+    });
+    logger.info('EmailService', `Escalation level ${level} email sent`, {
+      messageId: info.messageId,
+      to: recipientEmail,
+    });
+  } catch (err: any) {
+    logger.error('EmailService', `Failed to send escalation email for level ${level}`, {
+      to: recipientEmail,
+      error: err?.message,
+    });
+  }
+};

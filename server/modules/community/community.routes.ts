@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { voteOnIssue, getPendingIssues } from './community.controller';
+import { voteOnIssue, getPendingIssues, undoVoteOnIssue } from './community.controller';
 import { verifyJWT } from '../../middleware/auth.middleware';
 import { body, validationResult } from 'express-validator';
 import { VOTE_TYPES } from '../../config/constants';
@@ -23,6 +23,8 @@ router.post(
   validateRequest,
   voteOnIssue
 );
+
+router.delete('/:issueId/vote', verifyJWT, undoVoteOnIssue);
 
 router.get('/pending', verifyJWT, getPendingIssues);
 

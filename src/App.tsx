@@ -50,7 +50,7 @@ export default function App() {
         setCurrentPage('citizen-dashboard');
         return;
       }
-      if (page === 'citizen-dashboard' && user.role !== 'citizen') {
+      if (page === 'citizen-dashboard' && user.role !== 'citizen' && user.role !== 'volunteer') {
         setCurrentPage(user.role === 'admin' ? 'admin-dashboard' : 'officer-dashboard');
         return;
       }

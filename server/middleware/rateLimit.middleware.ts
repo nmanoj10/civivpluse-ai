@@ -1,4 +1,4 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 /**
  * Phase 4 (Priority 4.1) — Per-user + per-IP rate limit for issue submissions.
@@ -15,7 +15,7 @@ export const submissionRateLimit = rateLimit({
   keyGenerator: (req: any) => {
     // Rate-limit by authenticated userId when available, fallback to IP
     const userId = req.user?._id?.toString();
-    return userId || req.ip || 'unknown';
+    return userId || ipKeyGenerator(req);
   },
   handler: (_req, res) => {
     res.status(429).json({

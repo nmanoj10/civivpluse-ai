@@ -1,4 +1,4 @@
-﻿import { Issue } from './issue.model';
+import { Issue } from './issue.model';
 import { CommunityVote } from '../community/communityVote.model';
 import { assignIssueToAuthority } from '../assignments/assignment.service';
 import { ISSUE_STATUS, SEVERITY_LEVELS, VOTE_TYPES } from '../../config/constants';
@@ -7,13 +7,8 @@ import { emitToRoom, emitToUser, emitToGlobal } from '../../config/socket';
 import { logger } from '../../utils/logger';
 
 /**
- * PHASE 1.1 CONSTRAINT: fastTrackFlag behaviour:
- *   TRUE = sets fastTrackDeadline only (shortens the community review time window).
- *   Has ZERO effect on vote counts. Minimum 3 EXISTS votes always required.
- *   The routing check reads ONLY from CommunityVote records, never from this flag.
- *
- * Calculates priority score and routes issue to ward officer ONLY when the
- * community has provided >= 3 positive EXISTS votes.
+ * Calculates priority score, level, and reasons, and triggers auto-assignment
+ * when community verification threshold is met.
  */
 export const runPriorityEngineAndRoute = async (issueId: string): Promise<any> => {
   const issue = await Issue.findById(issueId);
@@ -24,99 +19,123 @@ export const runPriorityEngineAndRoute = async (issueId: string): Promise<any> =
 
   logger.info('PriorityEngine', 'Running priority evaluation', { issueId: issue._id.toString() });
 
-  // 1. AI Severity base score (max 50)
+  // 1. AI Severity points (max 30)
   let severityPoints = 5;
-  if (issue.severity === SEVERITY_LEVELS.CRITICAL) severityPoints = 50;
-  else if (issue.severity === SEVERITY_LEVELS.HIGH) severityPoints = 30;
-  else if (issue.severity === SEVERITY_LEVELS.MEDIUM) severityPoints = 15;
+  if (issue.severity === SEVERITY_LEVELS.CRITICAL) severityPoints = 30;
+  else if (issue.severity === SEVERITY_LEVELS.HIGH) severityPoints = 20;
+  else if (issue.severity === SEVERITY_LEVELS.MEDIUM) severityPoints = 10;
 
-  // 2. Trust Score weight (max 20)
-  const trustWeightPoints = Math.min(((issue.trustScore || 0) * 0.2), 20);
+  // 2. Trust Score weight (max 10)
+  const trustWeightPoints = Math.min(((issue.trustScore || 0) * 0.1), 10);
 
-  // 3. Community Votes weight — derived from real vote records (max 20)
-  const votes = await CommunityVote.find({ issueId: issue._id });
-  const positiveVotesCount = votes.filter(v => v.voteType === VOTE_TYPES.EXISTS).length;
-  const negativeVotesCount = votes.filter(v => v.voteType === VOTE_TYPES.NOT_FOUND).length;
-  const communityVotePoints = Math.min(positiveVotesCount * 5, 20);
+  // 3. Community Votes weight (max 15)
+  // Derived from support/reject counts on the issue
+  const supportCount = issue.supportCount || 0;
+  const rejectCount = issue.rejectCount || 0;
+  const communityVotePoints = Math.max(Math.min((supportCount * 5) - (rejectCount * 3), 15), 0);
 
-  // 4. Duplicate Reports weight (max 30)
+  // 4. Duplicate Reports weight (max 15)
   const duplicatesCount = issue.mergedIssueIds ? issue.mergedIssueIds.length : 0;
-  const duplicatePoints = Math.min(duplicatesCount * 10, 30);
+  const duplicatePoints = Math.min(duplicatesCount * 5, 15);
 
   // 5. Sensitive Location detection bonus (max 15)
-  let sensitiveLocationBonus = 0;
-  const sensitiveKeywords = ['school', 'hospital', 'highway', 'main road', 'market', 'metro', 'subway', 'station', 'bridge', 'railway'];
-  const textToScan = `${issue.title} ${issue.description} ${issue.location.address || ''}`.toLowerCase();
-  if (sensitiveKeywords.some(kw => textToScan.includes(kw))) sensitiveLocationBonus = 15;
+  const nearbyContextScore = issue.nearbyContextScore || 0;
+  const sensitiveLocationBonus = Math.min((nearbyContextScore * 0.15), 15);
 
-  // 6. Issue Age weight (max 15)
+  // 6. Issue Age weight (max 5)
   const hoursSinceCreation = Math.abs(Date.now() - new Date(issue.createdAt).getTime()) / (1000 * 60 * 60);
-  const agePoints = Math.min(Math.floor(hoursSinceCreation), 15);
+  const agePoints = Math.min(Math.floor(hoursSinceCreation / 24) * 0.5, 5);
 
-  // Final capped priority score
+  // 7. Citizens Affected weight (max 5)
+  const citizensAffected = issue.citizensAffected || 1;
+  const citizensPoints = Math.min(citizensAffected * 0.5, 5);
+
+  // 8. Traffic Impact weight (max 5)
+  let trafficPoints = 1;
+  if (issue.trafficImpact === 'HIGH') trafficPoints = 5;
+  else if (issue.trafficImpact === 'MEDIUM') trafficPoints = 3;
+
+  // Final priority score (0-100)
   const priorityScore = Math.min(
-    severityPoints + trustWeightPoints + communityVotePoints + duplicatePoints + sensitiveLocationBonus + agePoints,
+    severityPoints +
+    trustWeightPoints +
+    communityVotePoints +
+    duplicatePoints +
+    sensitiveLocationBonus +
+    agePoints +
+    citizensPoints +
+    trafficPoints,
     100
   );
 
   issue.priorityScore = Math.round(priorityScore);
 
-  // Persist per-component breakdown (Phase 3.1 — publicly exposed)
+  // Determine Priority Level
+  if (priorityScore >= 80) issue.priorityLevel = 'CRITICAL';
+  else if (priorityScore >= 60) issue.priorityLevel = 'HIGH';
+  else if (priorityScore >= 40) issue.priorityLevel = 'MEDIUM';
+  else issue.priorityLevel = 'LOW';
+
+  // Save breakdown details
   issue.priorityBreakdown = {
     severityPoints: Math.round(severityPoints),
     trustWeightPoints: Math.round(trustWeightPoints),
     communityVotePoints: Math.round(communityVotePoints),
     duplicatePoints: Math.round(duplicatePoints),
-    sensitiveLocationBonus,
-    agePoints: Math.round(agePoints),
+    sensitiveLocationBonus: Math.round(sensitiveLocationBonus),
+    agePoints: Math.round(agePoints)
   };
 
-  // Recalculate Severity label from computed score
-  if (priorityScore >= 75) issue.severity = SEVERITY_LEVELS.CRITICAL;
-  else if (priorityScore >= 50) issue.severity = SEVERITY_LEVELS.HIGH;
-  else if (priorityScore >= 30) issue.severity = SEVERITY_LEVELS.MEDIUM;
-
-  // FAST-TRACK FLAG (Phase 1.1 — flag-only, no vote-count effect):
-  // For high/critical severity, flag the issue and set an expedited deadline.
-  // This ONLY shortens the community review time window — the vote threshold is
-  // still 3 EXISTS votes, hardcoded in isCommunityRoute below and never read from this flag.
-  const isHighSeverity = (issue.severity === SEVERITY_LEVELS.HIGH || issue.severity === SEVERITY_LEVELS.CRITICAL);
-  if (isHighSeverity && !issue.fastTrackFlag) {
-    issue.fastTrackFlag = true;
-    issue.fastTrackDeadline = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2-hour window
-    logger.info('PriorityEngine', 'Fast-track flag set — vote count requirement unchanged (still 3)', {
-      issueId: issue._id.toString(),
-      fastTrackDeadline: issue.fastTrackDeadline,
-    });
+  // Generate Priority Reasons
+  const reasons: string[] = [];
+  
+  // Landmark checks
+  if (issue.landmarks && issue.landmarks.length > 0) {
+    const hasHospital = issue.landmarks.some(lm => lm.type.includes('hospital') && lm.distance <= 150);
+    const hasHighway = issue.landmarks.some(lm => (lm.type.includes('highway') || lm.type.includes('motorway') || lm.type.includes('primary')) && lm.distance <= 150);
+    const hasSchool = issue.landmarks.some(lm => lm.type.includes('school') && lm.distance <= 150);
+    
+    if (hasHospital) reasons.push('Near Hospital');
+    if (hasHighway) reasons.push('Highway Adjacent');
+    if (hasSchool) reasons.push('Near School');
   }
+
+  if (citizensAffected > 1) {
+    reasons.push(`${citizensAffected} Citizens Affected`);
+  }
+  if (supportCount >= 3) {
+    reasons.push('Community Verified');
+  }
+  if (duplicatesCount > 0) {
+    reasons.push(`${duplicatesCount} Duplicate Reports`);
+  }
+  if (issue.trustScore && issue.trustScore > 80) {
+    reasons.push('High Trust Reporter');
+  }
+  if (issue.trafficImpact === 'HIGH') {
+    reasons.push('High Traffic Impact');
+  }
+
+  if (reasons.length === 0) {
+    reasons.push('Standard Priority Evaluation');
+  }
+  issue.priorityReasons = reasons;
 
   await issue.save();
 
-  logger.success('PriorityEngine', 'Priority evaluation completed', {
+  logger.success('PriorityEngine', 'Priority evaluation completed successfully', {
     issueId: issue._id.toString(),
     score: issue.priorityScore,
-    severity: issue.severity,
-    breakdown: issue.priorityBreakdown,
-    positiveVotes: positiveVotesCount,
-    duplicates: duplicatesCount,
+    level: issue.priorityLevel,
+    reasons: issue.priorityReasons
   });
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // ROUTING RULE — Community gate is the ONLY path to ASSIGNED_TO_AUTHORITY.
-  //
-  // REMOVED (Phase 1.1 compliance):
-  //   ✗ isEmergencyRoute:  high severity + trust >= 70  → skips community gate  REMOVED
-  //   ✗ isPriorityCritical: score >= 75                 → skips community gate  REMOVED
-  //
-  // RETAINED:
-  //   ✓ isCommunityRoute: >= 3 EXISTS votes + trust >= 50
-  //     NOTE: fastTrackFlag does NOT appear in this check by design.
-  // ─────────────────────────────────────────────────────────────────────────────
+  // Routing check
   const REQUIRED_COMMUNITY_VOTES = 3;
   const REQUIRED_TRUST_FOR_ROUTING = 50;
 
   const isCommunityRoute =
-    positiveVotesCount >= REQUIRED_COMMUNITY_VOTES &&
+    supportCount >= REQUIRED_COMMUNITY_VOTES &&
     (issue.trustScore || 0) >= REQUIRED_TRUST_FOR_ROUTING;
 
   const routableStatuses: string[] = [
@@ -127,14 +146,26 @@ export const runPriorityEngineAndRoute = async (issueId: string): Promise<any> =
   if (isCommunityRoute && routableStatuses.includes(issue.status)) {
     logger.info('PriorityEngine', 'Community routing criteria met. Proceeding to assignment.', {
       issueId: issue._id.toString(),
-      positiveVotes: positiveVotesCount,
+      supportVotes: supportCount,
       trustScore: issue.trustScore,
     });
 
     if (issue.status !== ISSUE_STATUS.COMMUNITY_VERIFIED) {
       transitionStatus(issue, ISSUE_STATUS.COMMUNITY_VERIFIED);
-      issue.verifiedAt = new Date(); // Exposed publicly for escalation visibility (Phase 3.2)
+      issue.verifiedAt = new Date();
       await issue.save();
+      
+      // Notify community verified event
+      try {
+        const { createNotification } = await import('../notifications/notification.service');
+        await createNotification(
+          issue.reportedBy.toString(),
+          'COMMUNITY_VERIFIED',
+          'Issue Verified by Community',
+          `Your reported issue "${issue.title}" has been successfully verified by community consensus.`,
+          issue._id.toString()
+        );
+      } catch (err) { /* non-fatal */ }
     }
 
     try {
@@ -164,6 +195,7 @@ export const runPriorityEngineAndRoute = async (issueId: string): Promise<any> =
       });
     }
   } else {
+    // Just emit generic update event
     const wardName = issue.location.ward || 'Default';
     emitToRoom(`ward:${wardName}`, 'ISSUE_UPDATED', issue);
     emitToGlobal('ISSUE_UPDATED', issue);

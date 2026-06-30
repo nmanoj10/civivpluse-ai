@@ -3,13 +3,43 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import { ApiResponse } from '../../utils/ApiResponse';
 import { ManualReview } from './manualReview.model';
 import { Issue } from '../issues/issue.model';
+import { IssueMedia } from '../issues/issueMedia.model';
 import { ISSUE_STATUS } from '../../config/constants';
 import { createTimelineEvent } from '../issues/timeline.service';
 import { createAuditLog } from '../audit/audit.service';
+import { Escalation } from '../sla/escalation.model';
 
 export const getReviewQueue = asyncHandler(async (req: Request, res: Response) => {
   const queue = await ManualReview.find({ reviewStatus: 'PENDING' }).populate('issueId');
-  res.status(200).json(new ApiResponse(200, queue, 'Review queue retrieved'));
+  const queueWithMedia = await Promise.all(
+    queue.map(async (review: any) => {
+      if (!review.issueId) return review;
+      const mediaList = await IssueMedia.find({ issueId: review.issueId._id })
+        .select('url thumbnailUrl imageKitFileId uploadedBy mediaType mimeType')
+        .sort({ uploadedAt: -1 })
+        .lean();
+      const mappedMedia = mediaList.map((m: any) => ({
+        imageUrl: m.url,
+        thumbnailUrl: m.thumbnailUrl || m.url,
+        url: m.url,
+        imageKitFileId: m.imageKitFileId,
+        uploadedBy: m.uploadedBy,
+        mediaType: m.mediaType,
+        mimeType: m.mimeType
+      }));
+      const issueObj = review.issueId.toObject ? review.issueId.toObject() : review.issueId;
+      return {
+        ...review.toObject(),
+        issueId: {
+          ...issueObj,
+          media: mappedMedia,
+          thumbnail: mappedMedia[0]?.thumbnailUrl || null,
+          previewUrl: mappedMedia[0]?.imageUrl || null
+        }
+      };
+    })
+  );
+  res.status(200).json(new ApiResponse(200, queueWithMedia, 'Review queue retrieved'));
 });
 
 export const processReview = asyncHandler(async (req: Request, res: Response) => {
@@ -60,4 +90,9 @@ export const processReview = asyncHandler(async (req: Request, res: Response) =>
   }
 
   res.status(200).json(new ApiResponse(200, review, 'Review processed'));
+});
+
+export const getEscalationLogs = asyncHandler(async (req: Request, res: Response) => {
+  const logs = await Escalation.find().populate('issueId', 'title status severity').sort({ escalatedAt: -1 });
+  res.status(200).json(new ApiResponse(200, logs, 'Escalation logs retrieved'));
 });

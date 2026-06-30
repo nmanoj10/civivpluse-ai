@@ -51,3 +51,12 @@ export const getPendingIssues = asyncHandler(async (req: Request, res: Response)
   
   res.status(200).json(new ApiResponse(200, pendingIssues, 'Pending issues retrieved'));
 });
+
+export const undoVoteOnIssue = asyncHandler(async (req: Request, res: Response) => {
+  const { issueId } = req.params;
+  const userId = (req as any).user._id;
+
+  const result = await communityService.undoVote(issueId, userId);
+
+  res.status(200).json(new ApiResponse(200, result, 'Vote revoked successfully'));
+});

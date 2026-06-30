@@ -16,6 +16,13 @@ export interface IIssue extends Document {
   description: string;
   reportedCategory?: string;
   predictedCategory?: string;
+  predictedSubCategory?: string;
+  aiConfidence?: number;
+  duplicateScore?: number;
+  manualReviewFlag?: boolean;
+  detectedObjects?: string[];
+  riskSummary?: string;
+  recommendedOfficerDepartment?: string;
   /** Citizen-reported physical size reference (e.g. "car_tire") used to cross-check AI severity */
   citizenSizeReference?: string;
   location: {
@@ -41,6 +48,15 @@ export interface IIssue extends Document {
   priorityScore?: number;
   /** Per-component breakdown of priority score — persisted at calculation time, exposed publicly */
   priorityBreakdown?: IPriorityBreakdown;
+  priorityLevel?: string;
+  priorityReasons?: string[];
+  citizensAffected?: number;
+  trafficImpact?: string;
+  landmarks?: Array<{ name: string; type: string; distance: number; lat: number; lng: number; }>;
+  nearbyContextScore?: number;
+  supportCount?: number;
+  rejectCount?: number;
+  verifiedUsers?: mongoose.Types.ObjectId[];
   /** Timestamp when issue transitioned to COMMUNITY_VERIFIED — exposed publicly for escalation visibility */
   verifiedAt?: Date;
   /**
@@ -67,6 +83,12 @@ export interface IIssue extends Document {
   assignedOfficer?: mongoose.Types.ObjectId;
   assignedDepartment?: mongoose.Types.ObjectId;
   assignedAt?: Date;
+  media?: Array<{
+    imageUrl: string;
+    thumbnailUrl?: string;
+    imageKitFileId?: string;
+    uploadedBy?: mongoose.Types.ObjectId;
+  }>;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -78,6 +100,13 @@ const issueSchema = new Schema(
     description: { type: String, required: true },
     reportedCategory: { type: String },
     predictedCategory: { type: String },
+    predictedSubCategory: { type: String },
+    aiConfidence: { type: Number },
+    duplicateScore: { type: Number },
+    manualReviewFlag: { type: Boolean, default: false },
+    detectedObjects: { type: [String], default: [] },
+    riskSummary: { type: String },
+    recommendedOfficerDepartment: { type: String },
     location: {
       lat: { type: Number, required: true },
       lng: { type: Number, required: true },
@@ -114,6 +143,15 @@ const issueSchema = new Schema(
       sensitiveLocationBonus:{ type: Number, default: 0 },
       agePoints:             { type: Number, default: 0 },
     },
+    priorityLevel: { type: String, enum: ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] },
+    priorityReasons: { type: [String], default: [] },
+    citizensAffected: { type: Number, default: 1 },
+    trafficImpact: { type: String, enum: ['LOW', 'MEDIUM', 'HIGH'], default: 'LOW' },
+    landmarks: [{ name: String, type: String, distance: Number, lat: Number, lng: Number }],
+    nearbyContextScore: { type: Number, default: 0 },
+    supportCount: { type: Number, default: 0 },
+    rejectCount: { type: Number, default: 0 },
+    verifiedUsers: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     verifiedAt:           { type: Date },
     fastTrackFlag:        { type: Boolean, default: false },
     fastTrackDeadline:    { type: Date },
@@ -123,7 +161,7 @@ const issueSchema = new Schema(
       enum: ['dinner_plate','football','car_tire','truck_size','small','medium','large','other'],
     },
     duplicateOf: { type: Schema.Types.ObjectId, ref: 'Issue' },
-  masterIssueId: { type: Schema.Types.ObjectId, ref: 'MasterIssue' },
+    masterIssueId: { type: Schema.Types.ObjectId, ref: 'MasterIssue' },
     supporterCount: { type: Number, default: 1 },
     mergedIssueIds: [{ type: Schema.Types.ObjectId, ref: 'Issue' }],
     assignment: {
@@ -133,7 +171,15 @@ const issueSchema = new Schema(
     },
     assignedOfficer: { type: Schema.Types.ObjectId, ref: 'User' },
     assignedDepartment: { type: Schema.Types.ObjectId, ref: 'Department' },
-    assignedAt: { type: Date }
+    assignedAt: { type: Date },
+    media: [
+      {
+        imageUrl: { type: String, required: true },
+        thumbnailUrl: { type: String },
+        imageKitFileId: { type: String },
+        uploadedBy: { type: Schema.Types.ObjectId, ref: 'User' }
+      }
+    ]
   },
   { timestamps: true }
 );

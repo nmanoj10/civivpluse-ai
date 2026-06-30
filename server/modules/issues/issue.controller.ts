@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
+import { Issue } from './issue.model';
 import { MasterIssue } from './masterIssue.model';
 import { IssueMedia } from './issueMedia.model';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -7,9 +8,11 @@ import { ApiResponse } from '../../utils/ApiResponse';
 import { ApiError } from '../../utils/ApiError';
 import * as issueService from './issue.service';
 import { IssueTimeline } from './issueTimeline.model';
-import { Issue } from './issue.model';
 import { SLA } from '../sla/sla.model';
 import { Resolution } from '../resolutions/resolution.model';
+import { User } from '../users/user.model';
+import { Department } from '../assignments/department.model';
+import { Ward } from '../assignments/ward.model';
 import { logger } from '../../utils/logger';
 
 /**
@@ -53,9 +56,34 @@ export const getPublicIssues = asyncHandler(async (req: Request, res: Response) 
   })
     .select('-trustBreakdown -assignment')
     .sort({ createdAt: -1 })
-    .limit(50);
+    .limit(50)
+    .lean();
 
-  res.status(200).json(new ApiResponse(200, issues, 'Public issues retrieved'));
+  const issuesWithMedia = await Promise.all(
+    issues.map(async (issue: any) => {
+      const mediaList = await IssueMedia.find({ issueId: issue._id })
+        .select('url thumbnailUrl imageKitFileId uploadedBy mediaType mimeType')
+        .sort({ uploadedAt: -1 })
+        .lean();
+      const mappedMedia = mediaList.map((m: any) => ({
+        imageUrl: m.url,
+        thumbnailUrl: m.thumbnailUrl || m.url,
+        url: m.url,
+        imageKitFileId: m.imageKitFileId,
+        uploadedBy: m.uploadedBy,
+        mediaType: m.mediaType,
+        mimeType: m.mimeType
+      }));
+      return {
+        ...issue,
+        media: mappedMedia,
+        thumbnail: mappedMedia[0]?.thumbnailUrl || null,
+        previewUrl: mappedMedia[0]?.imageUrl || null
+      };
+    })
+  );
+
+  res.status(200).json(new ApiResponse(200, issuesWithMedia, 'Public issues retrieved'));
 });
 
 export const getIssueById = asyncHandler(async (req: Request, res: Response) => {
@@ -83,13 +111,22 @@ export const getIssueById = asyncHandler(async (req: Request, res: Response) => 
   const media = await IssueMedia.find({ issueId: { $in: clusterIds } }).sort({ uploadedAt: -1 });
   logger.info('IssueController', `Loaded ${media.length} collective media items for cluster of issue ${issueId}.`);
 
+  const mappedMedia = media.map((m: any) => {
+    const obj = m.toObject ? m.toObject() : m;
+    return {
+      ...obj,
+      imageUrl: obj.url,
+      thumbnailUrl: obj.thumbnailUrl || obj.url
+    };
+  });
+
   const now = new Date();
   const slaDeadline = sla?.dueDate ?? null;
   const isSlaBreached = slaDeadline ? now > new Date(slaDeadline) : false;
 
   res.status(200).json(new ApiResponse(200, {
     ...issue.toObject(),
-    media,
+    media: mappedMedia,
     sla,
     resolution,
     // Phase 1.4 + 3.2: Public escalation visibility (no auth required)
@@ -252,7 +289,7 @@ export const getNearbyIssues = asyncHandler(async (req: Request, res: Response) 
         issueId: { $first: '$issues._id' }
       }
     },
-    // Lookup first media thumbnail from the linked issue
+    // Lookup all media from the linked issue
     {
       $lookup: {
         from: 'issuemedia',
@@ -260,19 +297,18 @@ export const getNearbyIssues = asyncHandler(async (req: Request, res: Response) 
         pipeline: [
           { $match: { $expr: { $eq: ['$issueId', '$$iid'] } } },
           { $sort: { uploadedAt: -1 } },
-          { $limit: 1 },
-          { $project: { url: 1, thumbnailUrl: 1, mediaType: 1 } }
+          { $project: { imageUrl: '$url', thumbnailUrl: 1, url: '$url', imageKitFileId: 1, uploadedBy: 1, mediaType: 1, mimeType: 1 } }
         ],
-        as: 'previewMedia'
+        as: 'media'
       }
     },
     {
       $addFields: {
-        thumbnail: { $arrayElemAt: ['$previewMedia.thumbnailUrl', 0] },
-        previewUrl: { $arrayElemAt: ['$previewMedia.url', 0] }
+        thumbnail: { $arrayElemAt: ['$media.thumbnailUrl', 0] },
+        previewUrl: { $arrayElemAt: ['$media.imageUrl', 0] }
       }
     },
-    { $project: { previewMedia: 0, issues: 0 } }
+    { $project: { issues: 0 } }
   ]);
 
   res.status(200).json(new ApiResponse(200, nearby, 'Nearby issues retrieved'));
@@ -280,7 +316,7 @@ export const getNearbyIssues = asyncHandler(async (req: Request, res: Response) 
 
 /**
  * GET /api/issues/explore
- * Returns filtered and paginated MasterIssues for discovery.
+ * Returns filtered and paginated Issues for discovery (queries Issue collection for rich data).
  */
 export const exploreIssues = asyncHandler(async (req: Request, res: Response) => {
   const {
@@ -307,9 +343,11 @@ export const exploreIssues = asyncHandler(async (req: Request, res: Response) =>
   const skip = (pageNum - 1) * limitNum;
 
   // Build match query
-  const matchQuery: any = {};
+  const matchQuery: any = {
+    status: { $nin: ['DRAFT', 'REJECTED'] }
+  };
 
-  if (category) matchQuery.category = category;
+  if (category) matchQuery.reportedCategory = category;
   if (status) matchQuery.status = status;
   if (severity) matchQuery.severity = severity;
   
@@ -346,14 +384,18 @@ export const exploreIssues = asyncHandler(async (req: Request, res: Response) =>
     }
   }
 
-  // Text search
+  // Text search across multiple fields
   if (search) {
     const searchRegex = new RegExp(search, 'i');
     matchQuery.$or = [
       { title: searchRegex },
       { description: searchRegex },
-      { category: searchRegex },
-      { 'location.address': searchRegex }
+      { reportedCategory: searchRegex },
+      { 'location.address': searchRegex },
+      { 'location.ward': searchRegex },
+      { 'location.locality': searchRegex },
+      { 'location.city': searchRegex },
+      { status: searchRegex }
     ];
   }
 
@@ -374,7 +416,7 @@ export const exploreIssues = asyncHandler(async (req: Request, res: Response) =>
     }
   }
 
-  // Build pipeline
+  // Build pipeline — query Issue collection directly for rich, populated data
   const pipeline: any[] = [];
   if (geoNearStage) {
     pipeline.push(geoNearStage);
@@ -382,36 +424,31 @@ export const exploreIssues = asyncHandler(async (req: Request, res: Response) =>
     pipeline.push({ $match: matchQuery });
   }
 
-  // Look up first media thumbnail from linked issues
+  // Lookup first media thumbnail
   pipeline.push(
     {
       $lookup: {
-        from: 'issues',
-        localField: '_id',
-        foreignField: 'masterIssueId',
-        as: 'linkedIssues'
-      }
-    },
-    {
-      $lookup: {
         from: 'issuemedia',
-        let: { issueIds: '$linkedIssues._id' },
+        let: { iid: '$_id' },
         pipeline: [
-          { $match: { $expr: { $in: ['$issueId', '$$issueIds'] } } },
+          { $match: { $expr: { $eq: ['$issueId', '$$iid'] } } },
           { $sort: { uploadedAt: -1 } },
-          { $limit: 1 },
-          { $project: { url: 1, thumbnailUrl: 1, mediaType: 1 } }
+          { $limit: 4 },
+          { $project: { imageUrl: '$url', thumbnailUrl: 1, url: '$url', imageKitFileId: 1, uploadedBy: 1, mediaType: 1, mimeType: 1 } }
         ],
-        as: 'previewMedia'
+        as: 'media'
       }
     },
     {
       $addFields: {
-        thumbnail: { $arrayElemAt: ['$previewMedia.thumbnailUrl', 0] },
-        previewUrl: { $arrayElemAt: ['$previewMedia.url', 0] }
+        thumbnail: { $arrayElemAt: ['$media.thumbnailUrl', 0] },
+        previewUrl: { $arrayElemAt: ['$media.imageUrl', 0] },
+        supportCount: { $ifNull: ['$supportCount', 0] },
+        rejectCount: { $ifNull: ['$rejectCount', 0] },
+        supporterCount: { $ifNull: ['$supportCount', { $ifNull: ['$supporterCount', 0] }] }
       }
     },
-    { $project: { linkedIssues: 0, previewMedia: 0 } }
+    { $project: { linkedIssues: 0 } }
   );
 
   // Sorting stage
@@ -419,32 +456,60 @@ export const exploreIssues = asyncHandler(async (req: Request, res: Response) =>
     let sortStage: any = { createdAt: -1 };
     if (sortBy === 'newest') sortStage = { createdAt: -1 };
     else if (sortBy === 'priority') sortStage = { priorityScore: -1 };
-    else if (sortBy === 'supporters') sortStage = { supporterCount: -1 };
+    else if (sortBy === 'supporters') sortStage = { supportCount: -1 };
     pipeline.push({ $sort: sortStage });
   } else {
     if (sortBy === 'newest') pipeline.push({ $sort: { createdAt: -1 } });
     else if (sortBy === 'priority') pipeline.push({ $sort: { priorityScore: -1 } });
-    else if (sortBy === 'supporters') pipeline.push({ $sort: { supporterCount: -1 } });
-    // Default sorts by distance via geoNear stage
+    else if (sortBy === 'supporters') pipeline.push({ $sort: { supportCount: -1 } });
   }
 
   // Pagination stages
   pipeline.push({ $skip: skip }, { $limit: limitNum });
 
-  const results = await MasterIssue.aggregate(pipeline);
+  const results = await Issue.aggregate(pipeline);
+
+  // Populate officer and department info for each result
+  const populatedResults = await Promise.all(
+    results.map(async (result: any) => {
+      const populated: any = result;
+      if (result.assignment?.officerId) {
+        try {
+          const officer = await User.findById(result.assignment.officerId).select('name email phone').lean();
+          if (officer) {
+            populated.assignedOfficer = {
+              _id: officer._id,
+              name: officer.name,
+              email: officer.email,
+              phone: officer.phone
+            };
+          }
+        } catch {}
+      }
+      if (result.assignment?.departmentId) {
+        try {
+          const dept = await Department.findById(result.assignment.departmentId).select('name').lean();
+          if (dept) {
+            populated.assignedDepartment = { _id: dept._id, name: dept.name };
+          }
+        } catch {}
+      }
+      return populated;
+    })
+  );
 
   // Get total count for pagination metadata
   let totalCount = 0;
   if (geoNearStage) {
-    const countPipeline = [geoNearStage, { $count: 'total' }];
-    const countRes = await MasterIssue.aggregate(countPipeline);
+    const countPipeline = [{ $match: matchQuery }, { $count: 'total' }];
+    const countRes = await Issue.aggregate(countPipeline);
     totalCount = countRes[0]?.total || 0;
   } else {
-    totalCount = await MasterIssue.countDocuments(matchQuery);
+    totalCount = await Issue.countDocuments(matchQuery);
   }
 
   res.status(200).json(new ApiResponse(200, {
-    issues: results,
+    issues: populatedResults,
     pagination: {
       total: totalCount,
       page: pageNum,
@@ -457,6 +522,7 @@ export const exploreIssues = asyncHandler(async (req: Request, res: Response) =>
 /**
  * GET /api/issues/feed/locality
  * Returns locality-based feed (Ward/Locality/City) for current user.
+ * Queries Issue collection directly for rich populated data.
  */
 export const getLocalityFeed = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as any).user;
@@ -466,7 +532,7 @@ export const getLocalityFeed = asyncHandler(async (req: Request, res: Response) 
   const skip = (pageNum - 1) * limitNum;
 
   const matchQuery: any = {
-    status: { $ne: 'Closed' }
+    status: { $nin: ['DRAFT', 'REJECTED', 'NEEDS_MANUAL_REVIEW'] }
   };
 
   const orConditions: any[] = [];
@@ -478,9 +544,8 @@ export const getLocalityFeed = asyncHandler(async (req: Request, res: Response) 
     matchQuery.$or = orConditions;
   }
 
+  // Proximity sorting if coordinates present
   const pipeline: any[] = [];
-
-  // Proximity sorting if coordinates are present
   if (user.lat && user.lng) {
     pipeline.push({
       $geoNear: {
@@ -494,52 +559,63 @@ export const getLocalityFeed = asyncHandler(async (req: Request, res: Response) 
     pipeline.push({ $match: matchQuery });
   }
 
-  // Lookup thumbnail
+  // Lookup first media thumbnail
   pipeline.push(
     {
       $lookup: {
-        from: 'issues',
-        localField: '_id',
-        foreignField: 'masterIssueId',
-        as: 'linkedIssues'
-      }
-    },
-    {
-      $lookup: {
         from: 'issuemedia',
-        let: { issueIds: '$linkedIssues._id' },
+        let: { iid: '$_id' },
         pipeline: [
-          { $match: { $expr: { $in: ['$issueId', '$$issueIds'] } } },
+          { $match: { $expr: { $eq: ['$issueId', '$$iid'] } } },
           { $sort: { uploadedAt: -1 } },
-          { $limit: 1 },
-          { $project: { url: 1, thumbnailUrl: 1, mediaType: 1 } }
+          { $limit: 4 },
+          { $project: { imageUrl: '$url', thumbnailUrl: 1, url: '$url', imageKitFileId: 1, uploadedBy: 1, mediaType: 1, mimeType: 1 } }
         ],
-        as: 'previewMedia'
+        as: 'media'
       }
     },
     {
       $addFields: {
-        thumbnail: { $arrayElemAt: ['$previewMedia.thumbnailUrl', 0] },
-        previewUrl: { $arrayElemAt: ['$previewMedia.url', 0] }
+        thumbnail: { $arrayElemAt: ['$media.thumbnailUrl', 0] },
+        previewUrl: { $arrayElemAt: ['$media.imageUrl', 0] },
+        supportCount: { $ifNull: ['$supportCount', 0] },
+        rejectCount: { $ifNull: ['$rejectCount', 0] }
       }
-    },
-    { $project: { linkedIssues: 0, previewMedia: 0 } }
+    }
   );
 
-  // Sorting: priority, newest, then distance
+  // Sorting
   const sortStage: any = { priorityScore: -1, createdAt: -1 };
-  if (user.lat && user.lng) {
-    sortStage.dist = 1;
-  }
   pipeline.push({ $sort: sortStage });
 
   pipeline.push({ $skip: skip }, { $limit: limitNum });
 
-  const results = await MasterIssue.aggregate(pipeline);
-  const totalCount = await MasterIssue.countDocuments(matchQuery);
+  const results: any[] = await Issue.aggregate(pipeline);
+
+  // Populate officer and department info
+  const populatedResults = await Promise.all(
+    results.map(async (result: any) => {
+      const populated: any = result;
+      if (result.assignment?.officerId) {
+        try {
+          const officer = await User.findById(result.assignment.officerId).select('name email phone').lean();
+          if (officer) populated.assignedOfficer = { _id: officer._id, name: officer.name, email: officer.email, phone: officer.phone };
+        } catch {}
+      }
+      if (result.assignment?.departmentId) {
+        try {
+          const dept = await Department.findById(result.assignment.departmentId).select('name').lean().exec();
+          if (dept) populated.assignedDepartment = { _id: dept._id, name: dept.name };
+        } catch {}
+      }
+      return populated;
+    })
+  );
+
+  const totalCount = await Issue.countDocuments(matchQuery);
 
   res.status(200).json(new ApiResponse(200, {
-    issues: results,
+    issues: populatedResults,
     pagination: {
       total: totalCount,
       page: pageNum,
@@ -552,6 +628,7 @@ export const getLocalityFeed = asyncHandler(async (req: Request, res: Response) 
 /**
  * GET /api/issues/feed/community
  * Returns community feed for community page (newest, trending, resolved).
+ * Queries Issue collection directly for rich, populated data.
  */
 export const getCommunityFeed = asyncHandler(async (req: Request, res: Response) => {
   const { type = 'newest', page = '1', limit = '10' } = req.query as any;
@@ -559,59 +636,93 @@ export const getCommunityFeed = asyncHandler(async (req: Request, res: Response)
   const limitNum = parseInt(limit, 10) || 10;
   const skip = (pageNum - 1) * limitNum;
 
-  const matchQuery: any = {};
+  const matchQuery: any = {
+    status: { $nin: ['DRAFT', 'REJECTED', 'NEEDS_MANUAL_REVIEW'] }
+  };
 
   let sortStage: any = { createdAt: -1 };
 
   if (type === 'newest') {
     sortStage = { createdAt: -1 };
   } else if (type === 'trending' || type === 'supported') {
-    sortStage = { supporterCount: -1, updatedAt: -1 };
+    sortStage = { supporterCount: -1, createdAt: -1 };
   } else if (type === 'resolved') {
-    matchQuery.status = 'Closed';
+    matchQuery.status = { $in: ['RESOLVED', 'CLOSED_RESOLVED'] };
     sortStage = { updatedAt: -1 };
   }
 
-  const pipeline: any[] = [
-    { $match: matchQuery },
-    {
-      $lookup: {
-        from: 'issues',
-        localField: '_id',
-        foreignField: 'masterIssueId',
-        as: 'linkedIssues'
-      }
-    },
-    {
-      $lookup: {
-        from: 'issuemedia',
-        let: { issueIds: '$linkedIssues._id' },
-        pipeline: [
-          { $match: { $expr: { $in: ['$issueId', '$$issueIds'] } } },
-          { $sort: { uploadedAt: -1 } },
-          { $limit: 1 },
-          { $project: { url: 1, thumbnailUrl: 1, mediaType: 1 } }
-        ],
-        as: 'previewMedia'
-      }
-    },
-    {
-      $addFields: {
-        thumbnail: { $arrayElemAt: ['$previewMedia.thumbnailUrl', 0] },
-        previewUrl: { $arrayElemAt: ['$previewMedia.url', 0] }
-      }
-    },
-    { $project: { linkedIssues: 0, previewMedia: 0 } },
-    { $sort: sortStage },
-    { $skip: skip },
-    { $limit: limitNum }
-  ];
+  const issues = await Issue.find(matchQuery)
+    .populate('reportedBy', 'name email')
+    .populate('assignment.officerId', 'name email phone')
+    .populate('assignment.departmentId', 'name')
+    .sort(sortStage)
+    .skip(skip)
+    .limit(limitNum)
+    .lean();
 
-  const results = await MasterIssue.aggregate(pipeline);
-  const totalCount = await MasterIssue.countDocuments(matchQuery);
+  const issuesWithMedia = await Promise.all(
+    issues.map(async (issue: any) => {
+      const mediaList = await IssueMedia.find({ issueId: issue._id })
+        .select('url thumbnailUrl imageKitFileId uploadedBy mediaType mimeType')
+        .sort({ uploadedAt: -1 })
+        .lean();
+      const mappedMedia = mediaList.map((m: any) => ({
+        imageUrl: m.url,
+        thumbnailUrl: m.thumbnailUrl || m.url,
+        url: m.url,
+        imageKitFileId: m.imageKitFileId,
+        uploadedBy: m.uploadedBy,
+        mediaType: m.mediaType,
+        mimeType: m.mimeType
+      }));
+
+      const supporterCount = (issue.supportCount || issue.supporterCount || 0);
+      const rejectCount = issue.rejectCount || 0;
+      const progressPercent = Math.min(
+        Math.round(((supporterCount + issue.mergedIssueIds?.length || 0) / Math.max(supporterCount + rejectCount + 1, 1)) * 100),
+        100
+      );
+
+      return {
+        _id: issue._id,
+        issueId: issue._id,
+        title: issue.title,
+        description: issue.description,
+        reportedCategory: issue.reportedCategory,
+        predictedCategory: issue.predictedCategory,
+        status: issue.status,
+        location: issue.location,
+        priorityScore: issue.priorityScore || 0,
+        trustScore: issue.trustScore || 0,
+        severity: issue.severity,
+        supportCount: supporterCount,
+        supporterCount,
+        rejectCount,
+        reporter: issue.reportedBy,
+        assignedOfficer: issue.assignment?.officerId,
+        assignedDepartment: issue.assignment?.departmentId,
+        assignedAt: issue.assignedAt,
+        verifiedAt: issue.verifiedAt,
+        media: mappedMedia,
+        thumbnail: mappedMedia[0]?.thumbnailUrl || mappedMedia[0]?.imageUrl || null,
+        previewUrl: mappedMedia[0]?.imageUrl || null,
+        evidenceCount: mappedMedia.length,
+        createdAt: issue.createdAt,
+        updatedAt: issue.updatedAt,
+        mergedIssueIds: issue.mergedIssueIds || [],
+        priorityLevel: issue.priorityLevel,
+        priorityBreakdown: issue.priorityBreakdown,
+        progressPercent,
+        aiConfidence: issue.aiConfidence,
+        verified: ['COMMUNITY_VERIFIED', 'ASSIGNED_TO_AUTHORITY', 'IN_PROGRESS', 'RESOLVED', 'CLOSED_RESOLVED'].includes(issue.status)
+      };
+    })
+  );
+
+  const totalCount = await Issue.countDocuments(matchQuery);
 
   res.status(200).json(new ApiResponse(200, {
-    issues: results,
+    issues: issuesWithMedia,
     pagination: {
       total: totalCount,
       page: pageNum,
@@ -623,10 +734,11 @@ export const getCommunityFeed = asyncHandler(async (req: Request, res: Response)
 
 /**
  * POST /api/issues/master/:masterId/support
- * Increments upvote/support count on a MasterIssue.
+ * Increments upvote/support count on MasterIssue AND linked Issue documents.
  */
 export const supportMasterIssue = asyncHandler(async (req: Request, res: Response) => {
   const { masterId } = req.params;
+
   const master = await MasterIssue.findByIdAndUpdate(
     masterId,
     { $inc: { supporterCount: 1 } },
@@ -635,6 +747,12 @@ export const supportMasterIssue = asyncHandler(async (req: Request, res: Respons
   if (!master) {
     throw new ApiError(404, 'Master issue not found');
   }
+
+  // Also increment supportCount on all linked Issues
+  await Issue.updateMany(
+    { masterIssueId: masterId },
+    { $inc: { supportCount: 1 } }
+  );
 
   res.status(200).json(new ApiResponse(200, master, 'Supported issue successfully'));
 });
